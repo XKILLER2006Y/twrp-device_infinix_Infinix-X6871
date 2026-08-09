@@ -1,0 +1,198 @@
+name: Build OrangeFox X6871 (R12.0 / fox_12.1)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [fox_12.1-tos15]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  build:
+    name: Build OrangeFox Recovery (vendor_boot v4)
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout Device Tree
+        uses: actions/checkout@v4
+        with:
+          path: device/infinix/Infinix-X6871
+
+      - name: Free Disk Space (Reclaim 40+ GB)
+        run: |
+          echo "=== Disk Space Before Cleanup ==="
+          df -h
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/powershell
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf "/usr/local/share/boost"
+          sudo rm -rf /usr/share/codeql
+          sudo rm -rf /usr/local/lib/node_modules
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          sudo docker image prune --all --force 2>/dev/null || true
+          sudo apt-get clean
+          sudo swapoff -a 2>/dev/null || true
+          sudo rm -f /swapfile /mnt/swapfile 2>/dev/null || true
+          sudo fallocate -l 8G /mnt/swapfile || sudo dd if=/dev/zero of=/mnt/swapfile bs=1M count=8192
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          sudo sysctl vm.swappiness=10
+          echo "=== Disk & Swap Space After Cleanup ==="
+          df -h
+          free -h
+
+      - name: Setup Build Environment & Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
+            git gnupg gperf lib32ncurses5-dev lib32z1-dev liblz4-tool libncurses5 \
+            libncurses5-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop \
+            pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev \
+            python3 python3-pip openjdk-11-jdk
+          mkdir -p ~/bin
+          curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod +x ~/bin/repo
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Setup Persistent Ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-orangefox-x6871-${{ github.sha }}
+          restore-keys: |
+            ccache-orangefox-x6871-
+            ccache-
+
+      - name: Sync OrangeFox Build System (official sync script)
+        run: |
+          # Fix GitLab 401/403 auth error by clearing all GitHub extraheader tokens
+          git config --global --unset-all http.extraheader 2>/dev/null || true
+          git config --system --unset-all http.extraheader 2>/dev/null || true
+          git config --global --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+          git config --system --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+          export GIT_TERMINAL_PROMPT=0
+
+          cd $GITHUB_WORKSPACE
+          git clone https://gitlab.com/OrangeFox/sync.git orangefox_sync_tools
+          cd orangefox_sync_tools/sync
+          chmod +x orangefox_sync.sh
+          # init minimal TWRP manifest, apply Fox patches, swap in Fox recovery + vendor
+          ./orangefox_sync.sh --branch 12.1 --path ~/fox_12.1
+
+      - name: Place Device & Common Trees
+        run: |
+          set -e
+          cd ~/fox_12.1
+
+          # device tree (checked out by actions/checkout already)
+          mkdir -p device/infinix
+          cp -r $GITHUB_WORKSPACE/device/infinix/Infinix-X6871 device/infinix/Infinix-X6871
+
+          # common tree (shared mt6895 base)
+          if [ ! -d device/transsion/mt6895-common ]; then
+            git clone https://github.com/RamaBP-Recovery-Project/twrp-device_transsion_mt6895-common.git \
+              -b fox_12.1-tos15 device/transsion/mt6895-common
+          fi
+
+          # gflags (snapuserd dependency, not in minimal manifest)
+          if [ ! -d external/gflags ]; then
+            git clone https://android.googlesource.com/platform/external/gflags/ -b android-12.1.0_r4 external/gflags
+          fi
+
+          echo "=== Device tree files ==="
+          ls -la device/infinix/Infinix-X6871/
+          echo "=== Prebuilt assets ==="
+          ls -lh device/infinix/Infinix-X6871/prebuilt/
+          echo "=== Common tree present ==="
+          ls device/transsion/mt6895-common/ | head -20
+
+      - name: Compile OrangeFox Recovery
+        run: |
+          cd ~/fox_12.1
+
+          export USE_CCACHE=1
+          export CCACHE_DIR=~/.ccache
+          export ALLOW_MISSING_DEPENDENCIES=true
+          export SOONG_ALLOW_MISSING_DEPENDENCIES=true
+          export BUILD_BROKEN_DUP_RULES=true
+          export BUILD_BROKEN_ELF_PREBUILT_PRODUCT_COPY_FILES=true
+          export FOX_BUILD_TYPE=Unofficial
+          export FOX_BUILD_DEVICE=X6871
+          export LC_ALL=C
+          ccache -M 10G
+          ccache -z
+
+          source build/envsetup.sh
+          echo "=== Lunching twrp_X6871-eng ==="
+          lunch twrp_X6871-eng
+
+          # vendorsetup.sh applies haptics patch + clones gflags during lunch;
+          # verify patch state
+          echo "=== Checking haptics patch ==="
+          grep -n "haptics" bootable/recovery/vendor/orangefox/ 2>/dev/null | head -5 || echo "grep miss (patch may use different path)"
+
+          # Primary artifact: vendor_boot.img (64MB v4, recovery lives inside)
+          echo "=== Building vendor_boot image (required) ==="
+          mka vendorbootimage -j$(nproc --all)
+          BUILD_STATUS=$?
+          if [ $BUILD_STATUS -ne 0 ]; then
+            echo "FATAL: vendorbootimage build failed"
+            exit 1
+          fi
+
+          # Fox packaging (OrangeFox-*.zip) + standalone recovery img
+          echo "=== Building recoveryimage + Fox zip ==="
+          mka recoveryimage -j$(nproc --all) || true
+          mka otapackage -j$(nproc --all) || true
+
+          echo "=== Ccache Statistics ==="
+          ccache -s
+
+          echo "=== DEBUG: All generated artifacts ==="
+          find out/target/product/ -name "*.img" -exec ls -lh {} \; 2>/dev/null || echo "No .img files found"
+          find out/target/product/ -name "*.zip" -exec ls -lh {} \; 2>/dev/null || echo "No .zip files found"
+
+      - name: Prepare Build Artifacts
+        run: |
+          mkdir -p ~/artifacts
+          if [ -d "~/fox_12.1/out/target/product/Infinix-X6871" ]; then
+            cp ~/fox_12.1/out/target/product/Infinix-X6871/*.img ~/artifacts/ 2>/dev/null || true
+            cp ~/fox_12.1/out/target/product/Infinix-X6871/*.zip ~/artifacts/ 2>/dev/null || true
+          fi
+          find ~/fox_12.1/out/ -type f \( -name "vendor_boot.img" -o -name "recovery.img" -o -name "OrangeFox-*.zip" -o -name "*.zip" \) -not -path "*/.git/*" -exec cp {} ~/artifacts/ \; 2>/dev/null || true
+
+          echo "=== Purging small stub files (< 1MB) ==="
+          for item in ~/artifacts/*; do
+            if [ -f "$item" ]; then
+              ITEM_SIZE=$(stat -c%s "$item" 2>/dev/null || echo 0)
+              if [ "$ITEM_SIZE" -lt 1048576 ]; then
+                echo "Removing small stub: $(basename "$item") ($ITEM_SIZE bytes)"
+                rm -f "$item"
+              else
+                echo "Keeping valid artifact: $(basename "$item") ($(numfmt --to=iec "$ITEM_SIZE"))"
+              fi
+            fi
+          done
+
+          echo "=== Final Prepared Artifacts ==="
+          ls -lh ~/artifacts/
+          if [ -z "$(ls -A ~/artifacts/ 2>/dev/null)" ]; then
+            echo "ERROR: No valid build artifacts > 1MB found!"
+            exit 1
+          fi
+
+      - name: Upload Recovery Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: OrangeFox-X6871-${{ github.run_id }}
+          path: ~/artifacts/*
+          if-no-files-found: error
+          compression-level: 6
