@@ -130,7 +130,15 @@ jobs:
           ccache -M 10G
           ccache -z
 
+          # NOTE: OrangeFox's patched envsetup.sh appends an orangefox_envsetup
+          # call whose final statement checks frameworks/base/.../vts/Android.mk.
+          # That file does not exist in the minimal TWRP manifest, so the call
+          # returns 1 — harmless (all critical exports happen before it), but it
+          # would kill this step under bash -e. Source with -e suspended.
+          set +e
           source build/envsetup.sh
+          set -e
+          echo "envsetup.sh sourced OK"
           echo "=== Lunching twrp_X6871-eng ==="
           lunch twrp_X6871-eng
 
