@@ -37,7 +37,9 @@ FOX_BUILD_DEVICE="$FDEVICE"
 
 if [ "$1" = "$FDEVICE" -o "$FOX_BUILD_DEVICE" = "$FDEVICE" ]; then
 	# Clone to fix build on minimal manifest
-	git clone https://android.googlesource.com/platform/external/gflags/ -b android-12.1.0_r4 external/gflags
+	if [ ! -d external/gflags ]; then
+		git clone https://android.googlesource.com/platform/external/gflags/ -b android-12.1.0_r4 external/gflags
+	fi
 
 	# mt6895-common
 	fetch_mt6895_common_repo
