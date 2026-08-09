@@ -82,7 +82,7 @@ jobs:
 
           cd $GITHUB_WORKSPACE
           git clone https://gitlab.com/OrangeFox/sync.git orangefox_sync_tools
-          cd orangefox_sync_tools/sync
+          cd orangefox_sync_tools
           chmod +x orangefox_sync.sh
           # init minimal TWRP manifest, apply Fox patches, swap in Fox recovery + vendor
           ./orangefox_sync.sh --branch 12.1 --path ~/fox_12.1
